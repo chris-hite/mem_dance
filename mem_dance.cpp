@@ -40,12 +40,11 @@ void pauseCPU() {
 
 
 struct TestRig{
-
 	using I = uint64_t;
 	volatile uint64_t si = 0;
 	volatile uint64_t so = 0;  // bad to put in same cache line
 
-
+	// state for spinning fast thread
 	struct Tester {
 		volatile I* si;
 		volatile I* so;
@@ -60,12 +59,11 @@ struct TestRig{
 			while(*so != last)
 				pauseCPU();
 		}
+
+		void backGroundWork() {}
 	};
 
-	Tester makeTester() {
-		return Tester{this};
-	}
-
+	// state for
 	struct Reciever {
 		volatile I* si;
 		volatile I* so;
@@ -88,10 +86,6 @@ struct TestRig{
 		}
 	};
 
-	Reciever makeReceiver() {
-		return Reciever{this};
-	}
-
 	//// bits above will get factored out
 
 	volatile bool testLoopStarted = false;
@@ -100,10 +94,10 @@ struct TestRig{
 	void testLoop() {
 		pinCPU(7);
 
-		auto receiver = makeReceiver();
+		Reciever receiver{this};
 
 		testLoopStarted = true;
-		while(!done) {
+		while (!done) {
 			if (const auto message = receiver.recieve() ) {
 				receiver.reply(message);
 			} else {
@@ -115,18 +109,18 @@ struct TestRig{
 	void run(){
 		std::thread t([this] {testLoop();});
 
-		auto tester = makeTester();
+		Tester tester{this};
 
 		pinCPU(5);
-		while(!testLoopStarted)
+		while (!testLoopStarted)
 			__builtin_ia32_pause();
 
 		const auto ts = rdtsc();
-		const auto te = ts + tscPerSecondC;
+		const auto te = ts + tscPerSecondC * 5;
 
 		int64_t n = 0;
 		int64_t totalTSC = 0;
-		while(true) {
+		while (true) {
 			const auto t0 = rdtsc();
 			tester.signalAndWaitForResponse();
 			const auto t1 = rdtsc();
@@ -136,14 +130,22 @@ struct TestRig{
 			if( t1 > te)
 				break;
 
-			// try waiting a bit here
+			tester.backGroundWork();
+			// try waiting a bit here - slows it down some 20%
+			constexpr uint64_t waitUs = 0;
+
+			if (waitUs) {
+				const auto tw = t1 + waitUs * tscPerSecondC / 1000000;
+				while (rdtsc() < tw)
+					pauseCPU();
+			}
 		}
 
 		done = true;
 		t.join();
 
 
-		std::cout
+		std::cout << "tscPerSecond=" << tscPerSecondC
 			<< " n=" << n
 			<< " totalTSC=" << totalTSC
 			<< " ave(ns)=" << (totalTSC * 1e9 /tscPerSecondC  /n)
@@ -155,7 +157,6 @@ struct TestRig{
 
 
 int main() {
-	std::cout<< "tscPerSecond=" << tscPerSecondC <<std::endl;
 	TestRig().run();
 	return 0;
 }
@@ -163,8 +164,9 @@ int main() {
 
 /*
 g++ -g3 -O3 -std=c++1z  -pthread mem_dance.cpp   && sudo LD_LIBRARY_PATH=/home/chris/tools/gcc-7.3.0/lib64: chrt -f 1 ./a.out
-tscPerSecond=2591975717
- n=6205960 totalTSC=2057276640 ave(ns)=127.895
+tscPerSecond=2591987263 n=32948722 totalTSC=10461874562 ave(ns)=122.501
+
+
 
 
 
