@@ -31,26 +31,25 @@ inline void pinCPU(int cpu) {
 	sched_setaffinity(0, sizeof(s), &s);
 }
 
-
-
 void pauseCPU() {
 	__builtin_ia32_pause();
 }
 
 
+struct TwoWordSignaling {
+	using This = TwoWordSignaling;
 
-struct TestRig{
 	using I = uint64_t;
-	volatile uint64_t si = 0;
-	volatile uint64_t so = 0;  // bad to put in same cache line
+	volatile I si = 0;
+	volatile I so = 0;  // bad to put in same cache line
 
-	// state for spinning fast thread
+	// state for spinning testing
 	struct Tester {
 		volatile I* si;
 		volatile I* so;
 		I last;
 
-		Tester(TestRig* x) : si{ &x->si }, so{ &x->so }, last {} {}
+		Tester(This* x) : si{ &x->si }, so{ &x->so }, last {} {}
 
 		void signalAndWaitForResponse() {
 			++last;
@@ -63,13 +62,13 @@ struct TestRig{
 		void backGroundWork() {}
 	};
 
-	// state for
+	// state for spinning fast thread
 	struct Reciever {
 		volatile I* si;
 		volatile I* so;
 		I last;
 
-		Reciever(TestRig* x) : si{ &x->si }, so{ &x->so }, last{ *si } {}
+		Reciever(This* x) : si{ &x->si }, so{ &x->so }, last{ *si } {}
 
 		using Message = std::optional<I>;
 
@@ -85,9 +84,135 @@ struct TestRig{
 			*so = *m;
 		}
 	};
+};
 
-	//// bits above will get factored out
 
+// going to put this one on ice
+struct FastRing{
+	static constexpr size_t bufSize = 4096;
+	static constexpr size_t maxPayloadSize = 256;
+	static constexpr size_t maxPayloadAlignment = 8;
+	static constexpr size_t cacheLineSize = 64;  // could also be 128
+
+	char * buf;
+	size_t offset = 0;// published offset only used for resyncing a late Reader
+
+	const char* bufAtOffset(size_t offset) const  { return buf + (offset % bufSize); }
+	      char* bufAtOffset(size_t offset)        { return buf + (offset % bufSize); }
+
+
+	struct MessageHeader {
+		uint32_t size;
+		uint32_t seq;  // semlock-y
+	};
+
+	struct Writer {
+		FastRing* shared = nullptr;
+		size_t offset = 0;
+
+		char* prepareWrite(size_t s) {
+
+		}
+
+		void commmitWrite(size_t s) {
+
+		}
+	};
+
+	struct Reader {
+		FastRing* shared = nullptr;
+		size_t offset = 0;
+
+		Reader(FastRing& fr) : shared{&fr}, offset{fr.offset} {}
+
+		// safer read
+		size_t read(char* out, size_t bufSize) {
+			shared->bufAtOffset(offset);
+
+		}
+	};
+
+};
+/*
+
+ void sender() {
+ 	 writeMessageGuts
+ 	 clearNextControlWord()  // could be avoided if we prime it
+ 	 writeMessageControlWord()  // commit - could be message type or size
+ }
+
+ void reader() {
+ 	 if (nextControlWord() ) {
+ 	 	 handleMessage()
+ 	 }
+ }
+
+ can't decide if I want to entertain magic ring buffer
+ can't decide on MessageHeader
+
+ can I be optimistic and assume the reader keeps up?
+
+ */
+
+
+struct WordRingSignaling {
+	using This = WordRingSignaling;
+
+	using I = uint64_t;
+	static constexpr unsigned N = 4096;
+
+	volatile I si = 0;
+	volatile I so = 0;  // bad to put in same cache line
+
+	volatile I ring[N] {};
+
+	// state for spinning testing
+	struct Tester {
+		volatile I* si;
+		volatile I* so;
+		I last;
+
+		Tester(This* x) : si{ &x->si }, so{ &x->so }, last {} {}
+
+		void signalAndWaitForResponse() {
+			++last;
+			*si = last;
+
+			while(*so != last)
+				pauseCPU();
+		}
+
+		void backGroundWork() {}
+	};
+
+	// state for spinning fast thread
+	struct Reciever {
+		volatile I* si;
+		volatile I* so;
+		I last;
+
+		Reciever(This* x) : si{ &x->si }, so{ &x->so }, last{ *si } {}
+
+		using Message = std::optional<I>;
+
+		Message recieve() {
+			auto v = *si;
+			if ( last == v )
+				return {};
+			last = v;
+			return {v};
+		}
+
+		void reply(const Message& m) {
+			*so = *m;
+		}
+	};
+};
+
+
+
+
+struct TestRig : TwoWordSignaling{
 	volatile bool testLoopStarted = false;
 	volatile bool done = false;
 
