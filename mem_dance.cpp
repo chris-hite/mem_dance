@@ -51,6 +51,9 @@ struct TwoWordSignaling {
 
 		Tester(This* x) : si{ &x->si }, so{ &x->so }, last {} {}
 
+
+		void prepare() {}  // prepare, possibly prefetch
+
 		void signalAndWaitForResponse() {
 			++last;
 			*si = last;
@@ -58,8 +61,6 @@ struct TwoWordSignaling {
 			while(*so != last)
 				pauseCPU();
 		}
-
-		void backGroundWork() {}
 	};
 
 	// state for spinning fast thread
@@ -71,6 +72,8 @@ struct TwoWordSignaling {
 		Reciever(This* x) : si{ &x->si }, so{ &x->so }, last{ *si } {}
 
 		using Message = std::optional<I>;
+
+		void prepare() {}  // prepare, possibly prefetch
 
 		Message recieve() {
 			auto v = *si;
@@ -154,7 +157,7 @@ struct FastRing{
 
  */
 
-
+#if 0
 struct WordRingSignaling {
 	using This = WordRingSignaling;
 
@@ -182,7 +185,7 @@ struct WordRingSignaling {
 				pauseCPU();
 		}
 
-		void backGroundWork() {}
+		void prepare() {}
 	};
 
 	// state for spinning fast thread
@@ -208,9 +211,15 @@ struct WordRingSignaling {
 		}
 	};
 };
+#endif
 
-
-
+inline void spinSleep(const uint64_t waitUs, const uint64_t ts=rdtsc()) {
+	if (waitUs) {
+		const auto tw = ts + waitUs * tscPerSecondC / 1000000;
+		while (rdtsc() < tw)
+			pauseCPU();
+	}
+}
 
 struct TestRig : TwoWordSignaling{
 	volatile bool testLoopStarted = false;
@@ -225,6 +234,7 @@ struct TestRig : TwoWordSignaling{
 		while (!done) {
 			if (const auto message = receiver.recieve() ) {
 				receiver.reply(message);
+				// simulate logging something or blast cache
 			} else {
 				pauseCPU();
 			}
@@ -246,6 +256,9 @@ struct TestRig : TwoWordSignaling{
 		int64_t n = 0;
 		int64_t totalTSC = 0;
 		while (true) {
+			tester.prepare();
+			spinSleep(1);
+
 			const auto t0 = rdtsc();
 			tester.signalAndWaitForResponse();
 			const auto t1 = rdtsc();
@@ -255,15 +268,9 @@ struct TestRig : TwoWordSignaling{
 			if( t1 > te)
 				break;
 
-			tester.backGroundWork();
-			// try waiting a bit here - slows it down some 20%
+			// try waiting a bit here = slows it down some 20%
 			constexpr uint64_t waitUs = 0;
-
-			if (waitUs) {
-				const auto tw = t1 + waitUs * tscPerSecondC / 1000000;
-				while (rdtsc() < tw)
-					pauseCPU();
-			}
+			spinSleep(waitUs, t1);
 		}
 
 		done = true;
@@ -274,7 +281,7 @@ struct TestRig : TwoWordSignaling{
 			<< " n=" << n
 			<< " totalTSC=" << totalTSC
 			<< " ave(ns)=" << (totalTSC * 1e9 /tscPerSecondC  /n)
-			<<std::endl;
+			<< std::endl;
 	}
 };
 
