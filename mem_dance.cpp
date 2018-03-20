@@ -1,3 +1,4 @@
+#include "freed_ptr.hpp"
 
 #include <thread>
 #include <chrono>
@@ -24,6 +25,17 @@ inline uint64_t tscPerSecond(void) {
 
 inline const uint64_t tscPerSecondC = tscPerSecond();
 
+void pauseCPU() {
+	__builtin_ia32_pause();
+}
+
+inline void spinSleepUs(const uint64_t waitUs, const uint64_t ts=rdtsc()) {
+	if (waitUs) {
+		const auto tw = ts + waitUs * tscPerSecondC / 1000000;
+		while (rdtsc() < tw)
+			pauseCPU();
+	}
+}
 
 inline void pinCPU(int cpu) {
 	cpu_set_t s {};
@@ -31,17 +43,16 @@ inline void pinCPU(int cpu) {
 	sched_setaffinity(0, sizeof(s), &s);
 }
 
-void pauseCPU() {
-	__builtin_ia32_pause();
-}
 
 
 struct TwoWordSignaling {
 	using This = TwoWordSignaling;
 
 	using I = uint64_t;
-	volatile I si = 0;
-	volatile I so = 0;  // bad to put in same cache line
+
+	static constexpr size_t cacheLineSize = 128;
+	freed_ptr<volatile I> si = makeSuperAligned<volatile I>(cacheLineSize);
+	freed_ptr<volatile I> so = makeSuperAligned<volatile I>(cacheLineSize);
 
 	// state for spinning testing
 	struct Tester {
@@ -49,7 +60,7 @@ struct TwoWordSignaling {
 		volatile I* so;
 		I last;
 
-		Tester(This* x) : si{ &x->si }, so{ &x->so }, last {} {}
+		Tester(This* x) : si{ x->si.get() }, so{ x->so.get() }, last {} {}
 
 
 		void prepare() {}  // prepare, possibly prefetch
@@ -69,7 +80,7 @@ struct TwoWordSignaling {
 		volatile I* so;
 		I last;
 
-		Reciever(This* x) : si{ &x->si }, so{ &x->so }, last{ *si } {}
+		Reciever(This* x) : si{ x->si.get() }, so{ x->so.get() }, last{ *si } {}
 
 		using Message = std::optional<I>;
 
@@ -90,6 +101,8 @@ struct TwoWordSignaling {
 };
 
 
+
+#if 0
 // going to put this one on ice
 struct FastRing{
 	static constexpr size_t bufSize = 4096;
@@ -156,8 +169,6 @@ struct FastRing{
  can I be optimistic and assume the reader keeps up?
 
  */
-
-#if 0
 struct WordRingSignaling {
 	using This = WordRingSignaling;
 
@@ -213,13 +224,6 @@ struct WordRingSignaling {
 };
 #endif
 
-inline void spinSleep(const uint64_t waitUs, const uint64_t ts=rdtsc()) {
-	if (waitUs) {
-		const auto tw = ts + waitUs * tscPerSecondC / 1000000;
-		while (rdtsc() < tw)
-			pauseCPU();
-	}
-}
 
 struct TestRig : TwoWordSignaling{
 	volatile bool testLoopStarted = false;
@@ -230,13 +234,17 @@ struct TestRig : TwoWordSignaling{
 
 		Reciever receiver{this};
 
+		int i = 0;
 		testLoopStarted = true;
 		while (!done) {
 			if (const auto message = receiver.recieve() ) {
 				receiver.reply(message);
 				// simulate logging something or blast cache
 			} else {
-				pauseCPU();
+				if( i++ & 0xff )
+					pauseCPU();
+				else
+					receiver.prepare();
 			}
 		}
 	}
@@ -257,7 +265,7 @@ struct TestRig : TwoWordSignaling{
 		int64_t totalTSC = 0;
 		while (true) {
 			tester.prepare();
-			spinSleep(1);
+			spinSleepUs(1);
 
 			const auto t0 = rdtsc();
 			tester.signalAndWaitForResponse();
@@ -270,7 +278,7 @@ struct TestRig : TwoWordSignaling{
 
 			// try waiting a bit here = slows it down some 20%
 			constexpr uint64_t waitUs = 0;
-			spinSleep(waitUs, t1);
+			spinSleepUs(waitUs, t1);
 		}
 
 		done = true;
